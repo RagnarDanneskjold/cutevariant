@@ -1159,6 +1159,9 @@ class QueryBuilder(object):
         selection="variants",
         order_by=None,
         order_desc=True,
+        grouped = True,
+        limit = 100, 
+        offset = 0
     ):
         """Create an instance with different parameters 
 
@@ -1180,6 +1183,9 @@ class QueryBuilder(object):
         self.selection = selection
         self.order_by = order_by
         self.order_desc = order_desc
+        self.grouped = grouped 
+        self.limit = limit 
+        self.offset = offset
 
     @property
     def conn(self):
@@ -1195,127 +1201,119 @@ class QueryBuilder(object):
         #  Read samples and make possible to map the sample id from the sample name
         self.cache_samples_ids = dict([(i["name"], i["id"]) for i in get_samples(conn)])
 
-    @staticmethod
-    def _filters_to_flat(filters: dict):
-        """Recursive function to convert the filter hierarchical dictionnary into a list of fields
+    def filters_to_flat(self):
+        """Return flat list of filters. It removes Logic operator and stack all condition in a list  
 
+        Examples:
+            filters = "{'AND': [{'field': 'pos', 'operator': '>', 'value': 3.0},{'field': 'pos', 'operator': '<', 'value': 5.0} ]"
+            
+            will returns :
+
+                [{'field': 'pos', 'operator': '>', 'value': 3.0},{'field': 'pos', 'operator': '<', 'value': 5.0}]
+        """
+        def _recursive(filters: dict) -> list:
+            if isinstance(filters, dict) and len(filters) == 3:
+                yield filters
+
+            if isinstance(filters, dict):
+                for i in filters:
+                    yield from _recursive(filters[i])
+
+            if isinstance(filters, list):
+                for i in filters:
+                    yield from _recursive(i)
+
+        return list(_recursive(self.filters))
+
+
+
+    def filters_to_sql(self, format_sql = True):
+        """Recursive function to convert the filter hierarchical dictionnary into a SQL WHERE clause.
+        
         Args:
-            filter (dict): a nested tree of condition. @See example
-
-        Returns:
-            Return (list): all field are now inside a a list 
-
-        Todo:
-            Move to vql ? 
-
+            format_sql (format sql, optional): If this is True, columns are backquoted and prefixed by sql table
+        
         Examples:
             filters = {'AND': 
             [{'field': 'ref', 'operator': '=', 'value': "A"},
             {'field': 'alt', 'operator': '=', 'value': "C"}]
             }
-            
-            filters = _flatten_filter(filters)
-
-            # filters is now [{'field': 'ref', 'operator': '=', 'value': "A"},{'field': 'alt', 'operator': '=', 'value': "C"}]] 
-        """
-
-        if isinstance(filters, dict) and len(filters) == 3:
-            yield filters
-
-        if isinstance(filters, dict):
-            for i in filters:
-                yield from QueryBuilder._filters_to_flat(filters[i])
-
-        if isinstance(filters, list):
-            for i in filters:
-                yield from QueryBuilder._filters_to_flat(i)
-
-    def _filters_to_sql(self, node: dict, format_sql = True):
-        """Recursive function to convert the filter hierarchical dictionnary into a SQL WHERE clause.
         
-        Args:
+            filters = _flatten_filter(filters)
+        
+            # filters is now "ref = 'A' AND alt ='C' "
+        
+        
+        Deleted Parameters:
             filters (dict): a nested tree of condition. @See example
-
-        Returns:
+        
+        No Longer Returned:
             Return (str): a Sql Where clause
         
         """
 
-        if not node:
-            return ""
+        def _recursive(filters):
 
-        # Function to detect IF node is a Condition node (AND/OR)
-        # OR a field node with (name, operator, value) as keys
-        is_field = lambda x: True if len(x) == 3 else False
+            if not filters:
+                return ""
+            # Function to detect IF node is a Condition node (AND/OR)
+            # OR a field node with (name, operator, value) as keys
+            is_field = lambda x: True if len(x) == 3 else False
 
-        if is_field(node):
-            # print("IS FIELD", node)
+            if is_field(filters):
+                # print("IS FIELD", node)
 
-            # Process value
-            value = node["value"]
-            operator = node["operator"]
-            field = node["field"]
+                # Process value
+                value = filters["value"]
+                operator = filters["operator"]
+                field = filters["field"]
 
-            if type(value) == str:
-                value = f"'{value}'"
+                if type(value) == str:
+                    value = f"'{value}'"
 
-            if format_sql:
-                # Format for SQL 
-                field = self.column_to_sql(field, use_alias=False)
+                if format_sql:
+                    # Format for SQL 
+                    field = self.column_to_sql(field, use_alias=False)
 
-            # convert (genotype,sample,field) to genotype(sample).field
-            if isinstance(field,tuple):
-                field = "{}(\"{}\").{}".format(*field)
-        
-            # TODO ... c'est degeulasse ....
-            if operator in ("IN", "NOT IN"):
-                # DO NOT enclose value in quotes
-                # node: {'field': 'ref', 'operator': 'IN', 'value': "('A', 'T', 'G', 'C')"}
-                # wanted: ref IN ('A', 'T', 'G', 'C')
-                pass
-
-            elif isinstance(value, list):
-                value = "(" + ",".join(value) + ")"
-            else:
-                value = str(value)
-
-            # There must be spaces between these strings because of strings operators (IN, etc.)
-            return "%s %s %s" % (field, operator, value)
-        else:
-            # Not a field: 1 key only: the logical operator
-            logic_op = list(node.keys())[0]
-            # Recursive call for each field in the list associated to the
-            # logical operator.
-            # node:
-            # {'AND': [
-            #   {'field': 'ref', 'operator': 'IN', 'value': "('A', 'T', 'G', 'C')"},
-            #   {'field': 'alt', 'operator': 'IN', 'value': "('A', 'T', 'G', 'C')"}
-            # ]}
-            # Wanted: ref IN ('A', 'T', 'G', 'C') AND alt IN ('A', 'T', 'G', 'C')
-            out = [self._filters_to_sql(child, format_sql) for child in node[logic_op]]
-            # print("OUT", out, "LOGIC", logic_op)
-            # OUT ["refIN'('A', 'T', 'G', 'C')'", "altIN'('A', 'T', 'G', 'C')'"]
-            if len(out) == 1:
-                return f" {logic_op} ".join(out)
-            else:
-                return "(" + f" {logic_op} ".join(out) + ")"
-
-    @staticmethod
-    def _get_functions(columns, func_name="genotype"):
-        """Search and return Column-function (aka 3-tuple) from a list 
-
-            Column-function are tuple of 3 elements to describe a function.
-            genotype("TUMOR").GT == > (genotype,TUMOR,GT)
+                # convert (genotype,sample,field) to genotype(sample).field
+                if isinstance(field,tuple):
+                    field = "{}(\"{}\").{}".format(*field)
             
-            Args:
-                columns (list): List of columns
-                func_name (str, optional): The name of function. Defaults to "genotype".
-            
-            Returns:
-                list: Return a list of 3-tuple 
-            """
+                # TODO ... c'est degeulasse ....
+                if operator in ("IN", "NOT IN"):
+                    # DO NOT enclose value in quotes
+                    # node: {'field': 'ref', 'operator': 'IN', 'value': "('A', 'T', 'G', 'C')"}
+                    # wanted: ref IN ('A', 'T', 'G', 'C')
+                    pass
 
-        return (col for col in columns if isinstance(col, tuple) and len(col) == 3)
+                elif isinstance(value, list):
+                    value = "(" + ",".join(value) + ")"
+                else:
+                    value = str(value)
+
+                # There must be spaces between these strings because of strings operators (IN, etc.)
+                return "%s %s %s" % (field, operator, value)
+            else:
+                # Not a field: 1 key only: the logical operator
+                logic_op = list(filters.keys())[0]
+                # Recursive call for each field in the list associated to the
+                # logical operator.
+                # node:
+                # {'AND': [
+                #   {'field': 'ref', 'operator': 'IN', 'value': "('A', 'T', 'G', 'C')"},
+                #   {'field': 'alt', 'operator': 'IN', 'value': "('A', 'T', 'G', 'C')"}
+                # ]}
+                # Wanted: ref IN ('A', 'T', 'G', 'C') AND alt IN ('A', 'T', 'G', 'C')
+                out = [_recursive(child) for child in filters[logic_op]]
+                # print("OUT", out, "LOGIC", logic_op)
+                # OUT ["refIN'('A', 'T', 'G', 'C')'", "altIN'('A', 'T', 'G', 'C')'"]
+                if len(out) == 1:
+                    return f" {logic_op} ".join(out)
+                else:
+                    return "(" + f" {logic_op} ".join(out) + ")"
+
+        return _recursive(self.filters)
+
 
     def column_to_sql(self, column, use_alias=True):
         """ Guess from which table the column belongs to and return a well formated name
@@ -1341,9 +1339,29 @@ class QueryBuilder(object):
             column = column.replace("annotations.","")
             return f"`annotations`.`{column}`"
         
-   
+
 
         return column
+
+
+    @staticmethod
+    def _get_functions(columns, func_name="genotype"):
+        """Search and return Column-function (aka 3-tuple) from a list 
+
+            Column-function are tuple of 3 elements to describe a function.
+            genotype("TUMOR").GT == > (genotype,TUMOR,GT)
+            
+            Args:
+                columns (list): List of columns
+                func_name (str, optional): The name of function. Defaults to "genotype".
+            
+            Returns:
+                list: Return a list of 3-tuple 
+            """
+
+        return (col for col in columns if isinstance(col, tuple) and len(col) == 3)
+
+    
 
     def get_table_of_column(self, column):
         """Return table's name of a specific column
@@ -1426,7 +1444,7 @@ class QueryBuilder(object):
         sql_query += f"FROM variants"
 
         #  Add Join Annotations
-        columns_in_filters = [i["field"] for i in self._filters_to_flat(filters)]
+        columns_in_filters = [i["field"] for i in self.filters_to_flat()]
         
         # Loop over columns and check is annotations is required 
         need_join_annotations = False
@@ -1463,7 +1481,7 @@ class QueryBuilder(object):
 
         #  Add Where Clause
         if filters:
-            where_clause = self._filters_to_sql(filters)
+            where_clause = self.filters_to_sql()
             # TODO : filter_to_sql should returns empty instead of ()
             if where_clause and where_clause != "()":
                 sql_query += " WHERE " + where_clause
@@ -1515,7 +1533,7 @@ class QueryBuilder(object):
         base = f"SELECT {','.join(_c)} FROM {self.selection}"
         where = ""
         if self.filters:
-            where_clause = self._filters_to_sql(self.filters,format_sql = False)
+            where_clause = self.filters_to_sql(format_sql = False)
             if where_clause and where_clause != "()":
                 where = f" WHERE {where_clause}"
         
@@ -1636,8 +1654,14 @@ class QueryBuilder(object):
         """ Return children annotations """ 
 
         self.conn.row_factory = sqlite3.Row
+        
+        old_filters = self.filters 
         ann_filter = {"AND": [{"field": "annotations.variant_id", "operator": "=", "value": variant_id}]}
+        self.filters = ann_filter
+
         sub_query = self.build_sql(self.columns,ann_filter,self.selection, limit = None)
+        
+        self.filters = old_filters
         for variant in self.conn.execute(sub_query):
             yield list(dict(variant).values())
         
@@ -1738,7 +1762,7 @@ class QueryBuilder(object):
     def __repr__(self):
         return f"""
         columns : {self.columns}
-        filter: {self._filters_to_sql(self.filters)}
+        filter: {self.filters_to_sql()}
         selection: {self.selection}
         """
 

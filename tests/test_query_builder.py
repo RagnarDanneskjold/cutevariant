@@ -178,12 +178,12 @@ def test_column_to_sql(conn):
 
 def test_filters_to_flat(conn):
     """ convert filters to flatten list """
-    names = list([i["field"] for i in sql.QueryBuilder(conn)._filters_to_flat(FILTERS)])
+    names = list([i["field"] for i in sql.QueryBuilder(conn, filters=FILTERS).filters_to_flat()])
     assert names == ["chr","gene","pos"]
 
 def test_filters_to_sql(conn):
     """ convert filters to sql where clause """
-    assert sql.QueryBuilder(conn)._filters_to_sql(FILTERS) == "(`variants`.`chr` = 'chr1' AND (`annotations`.`gene` = 'gene1' OR `variants`.`pos` = 10))"
+    q = sql.QueryBuilder(conn, filters=FILTERS).filters_to_sql() == "(`variants`.`chr` = 'chr1' AND (`annotations`.`gene` = 'gene1' OR `variants`.`pos` = 10))"
 
 def test_from_vql(conn):
     q  = sql.QueryBuilder(conn)
